@@ -1,0 +1,1224 @@
+---
+title: "Modeling"
+author: "Marton Barta & David Torgerson"
+date: "4/22/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Set Up - Calling the Libraries
+```{r}
+library(Amelia)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(reshape2)
+library(naniar) # Load nanair for missing data visualization
+library(OneR) # Load OneR for binning function
+library(fastDummies) # for dummy variable creation
+library(lubridate) # for date to month conversion
+library(glmnet)
+library(plotmo)
+library(rpart)
+library(caret) # for confusion matrix
+library(randomForest)
+library(xgboost)
+library(pROC) # Load proc
+library(ggforce)
+```
+
+## Importing the Data
+```{r Read Data Set}
+data <- read.csv("/Volumes/GoogleDrive/Shared drives/HPA Spring 2021/data.csv")
+```
+
+## Data Preparation
+
+First lets work through some data preparation. As a first step we can view the dataset and summarize it:
+```{r}
+head(data)
+tail(data)
+colnames(data)
+summary(data)
+dim(data)
+```
+
+We have 6012 samples in the data and 144 variables. The dependent or response variable is: Winner.
+
+## Response Variable:
+```{r}
+## Response Variable Values
+unique(data$Winner)
+
+## Check Response Variable Frequency
+as.data.frame(table(data$Winner))
+```
+There are 110 matches when the result ended up being a draw. For the simplicity of our project and considering the fact that draws are very unlikely to occur, we will get rid of those matches completely for the rest of the project.
+
+The frequency seems to be a little unevenly distributed, but we have enough Blue Corner winners to continue our project.
+
+```{r}
+## Getting rid of the draw matches
+data<-subset(data, Winner!="Draw")
+as.data.frame(table(data$Winner))
+```
+Descriptions of our response values: 
+Blue – The Blue corner fighter won the match.
+Red - The Red corner fighter won the match.
+
+
+We will also get rid of the Women matches:
+```{r}
+## Getting rid of the Women weight classes
+data<-subset(data, weight_class!="WomenStrawweight")
+data<-subset(data, weight_class!="WomenBantamweight")
+data<-subset(data, weight_class!="WomenFlyweight")
+data<-subset(data, weight_class!="WomenFeatherweight")
+as.data.frame(table(data$weight_class)) # checking the rest of the weight classes
+```
+
+## Checking Missing values
+```{r}
+missmap(data, col=c("white", "black"), legend=FALSE)
+```
+The graph indicates some sort of relationship between missing data. However, most of the data seems to be present, which is promising for our analysis.
+
+Next, we will examine where our missing values are, and try to figure out the reason behind them.
+```{r}
+sum(is.na(data))
+colSums(is.na(data))
+```
+We have a total of 95,614 instances of missing data, but it is fairly well distributed - we have 1275 missing values for 49(!) variables. This means that 65% of the missing values are accounted for by those variables, while the rest can be explained by the ones that are missing 646 values and some other missing values across our dataset.
+
+```{r}
+str(data)
+```
+As we can see, we have all kinds of datatypes (chr, num, int); therefore, we have to be careful when we are working in the followings. We will have to be mindful about this since we will not be able to work with quantitative models just now.
+
+## Organizing the variable names and structuring the dataset
+
+```{r}
+colnames(data)
+```
+Our dataset has an unorganized structure; working with these variables would be hard, so, we will change the variable names. As we see, the dataset contains features to the Red (R_) and Blue (B_) fighters. We want to separate the fighters, so we can analyze them not just as opponents, but also as our picked fighter. In the following, we will fix the variable names and we will separate the fighters, meaning we will end up with double sample size.
+
+Wherever the variable starts with 'B_' or 'R_' (these refer to the fighters), we will get rid of those characters and we will organize those features into a variable which is associated with either the red or blue fighter.
+```{r}
+## Blue Fighter
+b_cols <- names(data)[grep("B_",names(data))][c(1:68,71)]
+#b_cols
+b_dat <- data[,b_cols]
+#b_dat
+names(b_dat) <- str_replace(names(b_dat),"B_", "")
+#names(b_dat)
+
+## Red Fighter
+r_cols <- names(data)[grep("R_",names(data))][c(1,12:79)]
+#r_cols
+r_dat <- data[,r_cols]
+#r_dat
+names(r_dat) <- str_replace(names(r_dat),"R_", "")
+#names(r_dat)
+```
+
+Next, we will add the corresponding opponent data to both the Red and Blue datasets so that each row has the match data for both the fighter and their opponent. This will be helpful for training our model later on.
+```{r}
+opp_1 <- r_dat
+#opp_1
+names(opp_1) <- paste(names(opp_1), "_opp")
+opp_2 <- b_dat
+names(opp_2) <- paste(names(opp_2), "_opp")
+```
+
+```{r}
+dat_1 <- cbind.data.frame(b_dat, opp_1)
+dat_1$Winner <- rep(0,nrow(dat_1))
+dat_1$Winner[data$Winner == "Blue"] <- 1
+
+dat_2 <- cbind.data.frame(r_dat, opp_2)
+dat_2$Winner <- rep(0,nrow(dat_2))
+dat_2$Winner[data$Winner == "Red"] <- 1
+```
+
+Now, we will combine the red and blue data into a master fighter dataset called f_data.
+
+```{r}
+f_data <- rbind.data.frame(dat_1, dat_2)
+#f_data
+#names(f_data)
+```
+
+Finally, we will add the admin data (such as referee, location, title_bout, and weight_class) to the fighter data into a dataset called combined. These variables did not contain neither R_ nor B_ at the beginnning of their names, meaning that we have not added those to our variable yet.
+
+```{r}
+#names(data)
+admindat <-  data[,c(3,4,5,7,8)]
+admindat <- rbind.data.frame(admindat,admindat)
+admindat
+names(admindat)
+```
+
+```{r}
+combined <- cbind(f_data,admindat) 
+names(combined)
+```
+The variable combined should contain all the variables that we will need for our analysis. This variable also lists the features as we want it to be.
+
+These are our variables:
+* `fighter` - The name of the fighter
+* `_opp_` - containing columns is the average of damage done by the opponent on the fighter
+* `_opp` - if it is at the end of the variable, then the variable refers to the fighter's opponent
+* `__pct` - Percentage of something
+* `KD` - is number of knockdowns
+* `SIG_STR` - is no. of significant strikes 'landed of attempted'
+* `SIG_STR_pct` - is significant strikes percentage
+* `TOTAL_STR` - is total strikes 'landed of attempted'
+* `TD` - is no. of takedowns
+* `TD_pct` - is takedown percentages
+* `SUB_ATT` - is no. of submission attempts
+* `PASS` - is no. times the guard was passed?
+* `REV` - is the no. of Reversals landed
+* `HEAD` - is no. of significant strinks to the head 'landed of attempted'
+* `BODY` - is no. of significant strikes to the body 'landed of attempted'
+* `CLINCH` - is no. of significant strikes in the clinch 'landed of attempted'
+* `GROUND` - is no. of significant strikes on the ground 'landed of attempted' win_by is method of win
+* `last_round`- is last round of the fight (ex. if it was a KO in 1st, then this will be 1)
+* `last_round_time` - is when the fight ended in the last round
+* `Format` - is the format of the fight (3 rounds, 5 rounds etc.)
+* `Referee` - is the name of the Ref
+* `date` - is the date of the fight
+* `location` - is the location in which the event took place
+* `Fight_type` - is which weight class and whether it's a title bout or not
+* `Winner` - is the winner of the fight
+* `Stance` - is the stance of the fighter (orthodox, southpaw, etc.)
+* `Height_cms` - is the height in centimeter
+* `Reach_cms` - is the reach of the fighter (arm span) in centimeter
+* `Weight_lbs` - is the weight of the fighter in pounds (lbs)
+* `age` - is the age of the fighter
+* `title_bout`  - Boolean value of whether it is title fight or not
+* `weight_class` - is which weight class the fight is in (Bantamweight, heavyweight, flyweight, etc.)
+* `no_of_rounds` - is the number of rounds the fight was scheduled for
+* `current_lose_streak` - is the count of current concurrent losses of the fighter
+* `current_win_streak` - is the count of current concurrent wins of the fighter
+* `draw` - is the number of draws in the fighter's ufc career
+* `wins` - is the number of wins in the fighter's ufc career
+* `losses` - is the number of losses in the fighter's ufc career
+* `total_rounds_fought` - is the average of total rounds fought by the fighter
+* `total_time_fought(seconds)` - is the count of total time spent fighting in seconds
+* `total_title_bouts` - is the total number of title bouts taken part in by the fighter
+* `win_by_Decision_Majority` - is the number of wins by majority judges decision in the fighter's ufc career
+* `win_by_Decision_Split` - is the number of wins by split judges decision in the fighter's ufc career
+* `win_by_Decision_Unanimous` - is the number of wins by unanimous judges decision in the fighter's ufc career
+* `win_by_KO/TKO` - is the number of wins by knockout in the fighter's ufc career
+* `win_by_Submission` - is the number of wins by submission in the fighter's ufc career
+* `win_by_TKO_Doctor_Stoppage` - is the number of wins by doctor stoppage in the fighter's ufc career
+
+```{r}
+as.data.frame(table(combined$Winner))
+```
+Since we have equal amount of winners and losers, that means that our transformation was successful and we ended up with a relatively big data size (10,874).
+
+Now, we will determine the most important variables in the dataset for predicting the Winner. These are the variables with which we will train our model.
+```{r Check Variable Occurence in Terms of Response Variable}
+# Select variables to use
+vars <- c("current_win_streak", "losses", "win_by_KO.TKO","win_by_Submission","current_lose_streak", "avg_SIG_STR_pct", "current_win_streak _opp","avg_TD_att", "current_lose_streak _opp", "longest_win_streak _opp", "wins _opp", "losses _opp", "wins")
+
+# Create vector of responses
+resps <- c("1","0")
+outcome <- c("1","0")
+
+
+# Create empty data frame to store proportion
+res_mat <- as.data.frame(matrix(NA, nrow = length(vars), ncol = length(outcome)))
+
+# Loop through and calculate proportion for each question and response
+s_dat <- as.data.frame(scale(combined[,vars]))
+
+names(s_dat) <- vars
+
+for(i in 1:nrow(res_mat)){
+  # Proportion of Won
+  res_mat[i,1] <- mean(s_dat[combined$Winner == 1, vars[i]], na.rm = TRUE)
+  # Proportion of Lost 
+  res_mat[i,2] <-  mean(s_dat[combined$Winner == 0, vars[i]], na.rm = TRUE)
+}
+
+
+# Add column names
+names(res_mat) <- outcome
+
+# Join with variable vector
+plot_dat <- cbind.data.frame(vars, res_mat)
+
+# Melt data (Convert to long form)
+m_dat <- melt(plot_dat, id.vars = "vars")
+
+# View melted data
+#m_dat
+
+g_1 <- ggplot(m_dat, aes(y = vars, x = variable, fill = value)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "dark blue", # Choose low color
+                       mid = "white", # Choose mid color
+                       high = "red", # Choose high color
+                       midpoint = mean(m_dat$value),
+                       space = "Lab", 
+                       na.value ="grey", # Choose NA value
+                       guide = "colourbar", # Set color bar
+                       aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Winner", y = "Characteristic", fill = "Mean value for winners and losers") # Set labels
+g_1 # Generate plot
+
+#cbind(res_mat, vars)
+```
+From the heat map it would appear that those who are winners are more likely to take down people, have significant strikes, and be on a current win streak than the ones who lost in the match.
+
+```{r}
+g_2 <- ggplot(combined[combined$weight_class %in% c("Heavyweight", "Featherweight", "Lightweight"),], aes(x = avg_SIG_STR_landed, fill = factor(Winner))) + # Set x as mean area and fill as diagnosis
+  geom_density(alpha = 0.5) + # Select density plot and set transperancy (alpha)
+    theme_set(theme_bw(base_size = 22) ) + # Set theme and text size
+  facet_grid(~weight_class) +
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Sign. Strike", title = "Significant Strikes - Winner v Loser",
+       fill = "Winner") + # Set labels
+  scale_fill_manual(values = c("1" = "red", "0" = "blue"), # Set fill colors manually
+                    labels = c("1" = "Winner", "0" = "Loser")) # Set labels for fill
+g_2 # Generate plot
+```
+From the g_2 density plot, it appears that losers have less significant strikes, while (surpisingly) in the lightweight category, the winners usually have less significant strikes.
+
+```{r}
+g_3<- ggplot(combined[combined$weight_class %in% c("Heavyweight", "Featherweight", "Lightweight"),], aes(x = avg_TD_att, fill = factor(Winner))) + # Set x as mean area and fill as diagnosis
+  geom_density(alpha = 0.5) + # Select density plot and set transparency (alpha)
+    theme_set(theme_bw(base_size = 22) ) + # Set theme and text size
+  facet_grid(~weight_class) +
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Average Takedown", title = "Takedowns - Winner v Loser",
+       fill = "Winner") + # Set labels
+  scale_fill_manual(values = c("1" = "red", "0" = "blue"), # Set fill colors manually
+                    labels = c("1" = "Winner", "0" = "Loser")) # Set labels for fill
+g_3 # Generate plot
+```
+It seems like that the losers and winners have approximately the same number of takedowns across weight classes, but it is important to mention that heavyweight fighters have less takedowns in general.
+
+```{r}
+g_4 <- ggplot(combined[combined$weight_class %in% c("Heavyweight", "Featherweight", "Lightweight"),], aes(x = win_by_KO.TKO, fill = factor(Winner))) + # Set x as mean area and fill as diagnosis
+  geom_density(alpha = 0.5) + # Select density plot and set transparency (alpha)
+    theme_set(theme_bw(base_size = 22) ) + # Set theme and text size
+  facet_grid(~weight_class) +
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "WINS by TKO", title = "WINS by TKO - Winner v Loser",
+       fill = "Winner") + # Set labels
+  scale_fill_manual(values = c("1" = "red", "0" = "blue"), # Set fill colors manually
+                    labels = c("1" = "Winner", "0" = "Loser")) # Set labels for fill
+g_4 # Generate plot
+```
+There seems to be a correlation between prior TKO wins in heavyweight class and winners, unlike in the other weight classes.
+
+## DEALING WITH AGE NAs
+```{r}
+combined <- drop_na(combined)
+```
+
+## New Variables
+```{r}
+combined$age_diff <- combined$age - combined$`age _opp`
+combined$height_diff <- combined$Height_cms - combined$`Height_cms _opp`
+combined$weight_diff <- combined$Weight_lbs - combined$`Weight_lbs _opp`
+combined$reach_diff <- combined$Reach_cms - combined$`Reach_cms _opp`
+```
+
+## Formatting Variables
+```{r}
+## DATE TO DAYs
+day_calc <- function(dates){
+  x <- as.POSIXct(dates)
+  return(floor(unclass(x)/86400))
+}
+combined$days <- day_calc(combined$date) # assign this to the dataset as days
+
+## DATE TO MONTHs
+combined$month <- month(combined$date) # assign this to the dataset as month
+
+# Stance and Stance opponent as dummies 
+combined <- dummy_cols(combined, select_columns = c("Stance", "Stance _opp"))
+#combined
+
+# Weightclass as dummies 
+combined <- dummy_cols(combined, select_columns = c("weight_class"))
+#combined
+
+
+## Referee - Use top 5 and set the rest as "Other" for dummy variables
+combined$Referee <- if_else(combined$Referee %in% c('Herb Dean', 'Dan Miragliotta', 'John McCarthy', 'Marc Goddard', 'Mario Yamasaki'), combined$Referee, "Other")
+combined <- dummy_cols(combined, select_columns = c("Referee"))
+titlebout <- rep(FALSE, nrow(combined))
+titlebout[combined$title_bout == "True"] <- TRUE
+combined$title_bout <- titlebout
+
+
+## Deleting the unnecessary columns
+combined <- combined[, !(colnames(combined) %in% c("location","date","Stance", "Stance _opp", "weight_class"))]
+combined <-combined[, !(colnames(combined) %in% c("fighter","fighter _opp","draw","draw _opp", "Referee" ))]
+names(combined)
+```
+
+```{r}
+set.seed(1234)
+split = sort(sample(nrow(combined), nrow(combined)*.8))
+fights_train<-combined[split,]
+fights_test<-combined[-split,]
+
+# Cleaning up names for models
+names(fights_train) <- make.names(names(fights_train))
+names(fights_test) <- make.names(names(fights_test))
+
+fights_train$Winner <- factor(fights_train$Winner)
+fights_test$Winner <- factor(fights_test$Winner)
+```
+
+```{r}
+# LASSO MODEL
+set.seed(1234)
+x_vars <- model.matrix(Winner ~., combined)[,-1]
+combined_scaled <- scale(x_vars) # Scale dataset
+
+# Fit lasso model with the best lambda
+fit_1 <- glmnet(x = combined_scaled, # Set x variables
+                y = combined$Winner, # Set response variable
+                family = "binomial", # Set family to binomial
+                alpha = 1, # Set alpha as 1 for lasso
+                lambda = 0.01) # Set lambda as 0.01
+# Print out coefficients
+coef(fit_1)
+```
+___________________________________________________________________________________________________________________________________________________________________________
+##Decision Tree
+```{r}
+# DECISION TREE
+set.seed(1234) # Set random number generator seed for reproducibility
+tree_model <- rpart(factor(Winner) ~., # Set tree formula
+                data = fights_train) # Set dataset
+
+# Prediction with classification tree
+tree_preds <- predict(tree_model, fights_test, type = 'class')
+
+#Confusion Matrix
+t <- table(tree_preds, fights_test$Winner) # Create table
+confusionMatrix(t)
+
+# Accuracy: 0.5618
+# Sensitivity: 0.5431
+# Specificity: 0.5813
+```
+___________________________________________________________________________________________________________________________________________________________________________
+##Bagging
+```{r BootStrap Aggregration (Bagging)}
+set.seed(1234) # Set random number generator seed for reproducibility
+
+# Use random forest to do bagging
+bag_mod <- randomForest(Winner ~., # Set tree formula
+                data = fights_train, # Set dataset
+                mtry = 164, # Set mtry to number of variables 
+                ntree = 200) # Set number of trees to use
+bag_mod # View model
+
+# Confusion Matrix
+bag_preds <- predict(bag_mod, fights_test) # Create predictions for bagging model
+
+t <- table(bag_preds,fights_test$Winner) # Create table
+confusionMatrix(t) # Produce confusion matrix
+## ACCURACY: 0.5823 
+## SENSITIVITY: 0.5847
+```
+
+```{r}
+tree_1 <- getTree(bag_mod, 3, labelVar=TRUE) # Extract single tree,
+head(tree_1) # Print first 5 rows of single tree details
+```
+
+```{r Error Rate}
+oob_error <- bag_mod$err.rate[,1] # Extract oob error
+plot_dat <- cbind.data.frame(rep(1:length(oob_error)), oob_error) # Create plot data
+names(plot_dat) <- c("trees", "oob_error") # Name plot data
+
+
+# Plot oob error
+g_1 <- ggplot(plot_dat, aes(x = trees, y = oob_error)) + # Set x as trees and y as error
+  geom_point(alpha = 0.5, color = "blue") + # Select geom point
+  geom_smooth() + # Add smoothing line
+  theme_bw() + # Set theme
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Number of Trees", title = "Error Rate v Number of Trees",
+       y = "Error Rate")  # Set labels
+g_1 # Print plot
+
+## number of trees = 180
+```
+
+```{r Bagging with 1000 trees}
+set.seed(1234) # Set random number generator seed for reproducibility
+bag_mod_2 <- randomForest(Winner ~., # Set tree formula
+                data = fights_train, # Set data to use
+                mtry = 164, # Set number of variables to use
+                ntree = 1000) # Set number of trees
+
+oob_error <- bag_mod_2$err.rate[,1] # Extract oob error
+plot_dat <- cbind.data.frame(rep(1:length(oob_error)), oob_error) # Create plot data
+names(plot_dat) <- c("trees", "oob_error") # Name plot data
+
+# Plot oob error
+g_2 <- ggplot(plot_dat, aes(x = trees, y = oob_error)) + # Set x as trees and y as error
+  geom_point(alpha = 0.5, color = "blue") + # Select geom point
+  geom_smooth() + # Add smoothing line
+  theme_bw() + # Set theme
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Number of Trees", title = "Error Rate v Number of Trees",
+       y = "Error Rate")  # Set labels
+g_2 # Create plot
+## number of trees is arounf 800-ish
+```
+
+```{r 2nd Prediction Model Confusion Matrix}
+bag_preds_2 <- predict(bag_mod_2, fights_test) # Predict test data
+
+t <- table(bag_preds_2,fights_test$Winner) # Create table
+confusionMatrix(t) # Produce confusion matrix
+## ACCURACY: 0.5823 
+## SENSITIVITY: 0.5833
+```
+### TAKES FOREVER
+```{r Bagging Parameter Tuning}
+#Could take a while to run 
+trees <- c(10, 25, 50, 100, 200, 750) # Create vector of possible tree sizes
+nodesize <- c(1, 10, 25, 50, 100, 200, 500, 1000) # Create vector of possible node sizes
+
+params <- expand.grid(trees, nodesize) # Expand grid to get data frame of parameter combinations
+names(params) <- c("trees", "nodesize") # Name parameter data frame
+res_vec <- rep(NA, nrow(params)) # Create vector to store accuracy results
+
+for(i in 1:nrow(params)){ # For each set of parameters
+  set.seed(1234) # Set seed for reproducibility
+  mod <- randomForest(Winner ~. , # Set formula
+                      data=fights_train,# Set data
+                      mtry = 164, # Set number of variables
+                      importance = FALSE,  # 
+                      ntree = params$trees[i], # Set number of trees
+                      nodesize = params$nodesize[i]) # Set node size
+  res_vec[i] <- 1 - mod$err.rate[nrow(mod$err.rate),1] # Calculate out of bag accuracy
+}
+
+summary(res_vec) # Summarize accuracy results
+
+res_db <- cbind.data.frame(params, res_vec) # Join parameters and accuracy results
+names(res_db)[3] <- "oob_accuracy" # Name accuracy results column
+res_db # Print accuracy results column
+```
+
+```{r Heatmap Tuning}
+res_db$trees <- as.factor(res_db$trees) # Convert tree number to factor for plotting
+res_db$nodesize <- as.factor(res_db$nodesize) # Convert node size to factor for plotting
+g_3 <- ggplot(res_db, aes(y = trees, x = nodesize, fill = oob_accuracy)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+    mid = "white", # Choose mid color
+    high = "red", # Choose high color
+    midpoint =mean(res_db$oob_accuracy), # Choose mid point
+    space = "Lab", 
+    na.value ="grey", # Choose NA value
+    guide = "colourbar", # Set color bar
+    aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Node Size", y = "Number of Trees", fill = "OOB Accuracy") # Set labels
+g_3 # Generate plot
+```
+
+```{r Best Results}
+res_db[which.max(res_db$oob_accuracy),] # View best set of results
+# TREES: 750
+# NODE SIZE: 200
+# OOB ACCURACY: 0.592717 
+```
+
+```{r Optimal Bagging}
+set.seed(1234)
+bag_mod_3 <- randomForest(Winner ~., # Set tree formula
+                data = fights_train, # Set dataset
+                mtry = 164, # Set number of variables 
+                ntree = 750, # Set number of trees
+                nodesize = 200) # Set node size
+
+bag_preds_3 <- predict(bag_mod_3, fights_test) # Create predictions for test data
+
+
+t <- table(bag_preds_3,  fights_test$Winner) # Create table
+confusionMatrix(t) # Produce confusion matrix
+```
+
+```{r Cross Validation}
+set.seed(1234) # Set seed for reproducibility
+# Create cross-validation index
+cv_ind <- sample(1:5, nrow(fights_train), replace = TRUE )
+
+# Create accuracy store
+cv_acc <- rep(NA, 5)
+for(i in 1:5){ # For 1 to 5
+  cv_train <- fights_train[cv_ind != i,] # Create training data
+  cv_test <- fights_train[cv_ind == i,] # Create test data
+
+  bag_mod_4 <- randomForest(Winner ~., # Set tree formula
+                data = cv_train, # Set dataset
+                mtry = 32, # set number of variables to use
+                ntree = 500, # Set number of trees to generate
+                nodesize = 10) # Set node size
+  bag_preds_4 <- predict(bag_mod_4, cv_test) # Create test data predictions
+
+
+  t <- table(bag_preds_4,cv_test$Winner) # Create table
+  cf_mat <- confusionMatrix(t) # Create confusion matrix
+  cv_acc[i] <- cf_mat$overall[1] # Extract accuracy
+}
+
+# Print cross validated accuracy scores
+cv_acc
+
+# Average Cross Validation
+mean(cv_acc)
+```
+
+__________________________________________________________________________________________________________________________________________________________________________
+##Random Forest
+
+```{r Random Forest Training Model}
+set.seed(1234)
+head(fights_train)
+
+rf_rate <- randomForest(Winner ~., # Set tree formula
+                       data = fights_train, # Set dataset
+                       ntree = 100) # Set number of trees to use
+rf_rate # View model
+```
+
+```{r Random Forest Error Rate Plot}
+oob_error1 <- rf_rate$err.rate[,1] # Extract oob error
+plot_dat1 <- cbind.data.frame(rep(1:length(oob_error1)), oob_error1) # Create plot data
+names(plot_dat1) <- c("trees", "oob_error") # Name plot data
+
+# Plot oob error
+rfoob <- ggplot(plot_dat1, aes(x = trees, y = oob_error)) + # Set x as trees and y as error
+  geom_point(alpha = 0.5, color = "blue") + # Select geom point
+  theme_bw() + # Set theme
+  geom_smooth() + # Add smoothing line
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Number of Trees", title = "Error Rate v Number of Trees",
+       y = "Error Rate")  # Set labels
+rfoob # Print plot
+```
+
+```{r Random Forest 1st Test Model}
+rf_prediction <- predict(rf_rate, fights_test) # Create predictions for random forest model
+
+rf_t <- table(rf_prediction, fights_test$Winner) # Create table
+rf_t
+confusionMatrix(rf_t) # Produce confusion matrix
+
+# ACCURACY: 0.5859
+# SENSITIVITY: 0.5667
+```
+
+
+```{r Random Forest Tuning}
+rf_mtry_vals <- c(2, 4, 5, 7, 9, 12, 15, 20)
+rf_nodesize_vals <- c(1, 10, 15, 50, 100, 150, 200, 500)
+
+rf_params <- expand.grid(rf_mtry_vals, rf_nodesize_vals)
+names(rf_params) <- c("mtry", "nodesize")
+rf_acc_vec <- rep(NA, nrow(rf_params))
+rf_sens_vec <- rep(NA, nrow(rf_params))
+
+for(i in 1:nrow(rf_params)){
+  set.seed(1234)
+  rf_rate <- randomForest(Winner ~., # Set tree formula
+                         data = fights_test, # Set dataset
+                         ntree = 150,
+                         nodesize = rf_params$nodesize[i],
+                         mtry = rf_params$mtry[i]) # Set number of trees to use
+  rf_preds_1 <-rf_rate$predicted # Create predictions for bagging model
+
+  rf_t <- table(rf_preds_1,   fights_test$Winner) # Create table
+  rf_c <- confusionMatrix(rf_t) # Produce confusion matrix
+  
+  rf_acc_vec[i] <- rf_c$overall[1]
+  rf_sens_vec[i] <- rf_c$byClass[1]
+}
+```
+
+
+```{r Random Forest Tuning Accuracy Visualization}
+rf_res_db <- cbind.data.frame(rf_params, rf_acc_vec, rf_sens_vec)
+rf_res_db$mtry <- as.factor(rf_res_db$mtry) # Convert tree number to factor for plotting
+rf_res_db$nodesize <- as.factor(rf_res_db$nodesize) # Convert node size to factor for plotting
+rf_g_1 <- ggplot(rf_res_db, aes(y = mtry, x = nodesize, fill = rf_acc_vec)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+    mid = "white", # Choose mid color
+    high = "red", # Choose high color
+    midpoint =mean(rf_res_db$rf_acc_vec), # Choose mid point
+    space = "Lab", 
+    na.value ="grey", # Choose NA value
+    guide = "colourbar", # Set color bar
+    aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Node Size", y = "mtry", fill = "OOB Accuracy") # Set labels
+rf_g_1 # Generate plot
+```
+
+```{r Random Forest Sensitivity Visualization}
+rf_g_2 <- ggplot(rf_res_db, aes(y = mtry, x = nodesize, fill = rf_sens_vec)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+    mid = "white", # Choose mid color
+    high = "red", # Choose high color
+    midpoint =mean(rf_res_db$rf_sens_vec), # Choose mid point
+    space = "Lab", 
+    na.value ="grey", # Choose NA value
+    guide = "colourbar", # Set color bar
+    aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Node Size", y = "Mtry", fill = "OOB Sensitivity") # Set labels
+rf_g_2 # Generate plot
+```
+
+```{r Random Forest Determine Best Nodesize and Mtry}
+rf_res_db[which(rf_res_db$nodesize == 1),]
+## BEST:
+# mtry: 15  nodesize: 1
+```
+
+```{r Finale Random Forest Model}
+set.seed(1234)
+rf_rate_final <- randomForest(Winner ~., # Set tree formula
+                         data = fights_train, # Set dataset
+                         ntree = 200,
+                         nodesize = 1,
+                         mtry = 15) # Set number of trees to use
+
+rf_preds_1 <- predict(rf_rate_final,fights_test) # Create predictions for random forest model
+
+rf_t <- table(rf_preds_1, fights_test$Winner) # Create table
+confusionMatrix(rf_t) # Produce confusion matrix
+
+## ACCURACY: 0.5739
+## SENSITIVITY: 0.5625
+## SPECIFICITY: 0.5856
+```
+
+___________________________________________________________________________________________________________________________________________________________________________
+##XgBoost
+
+```{r XGBoost Preparation}
+
+set.seed(1234) # Set random number generator seed for reproducibility
+#names(fights_train)
+gtrain <- xgb.DMatrix(data = as.matrix(fights_train[,c(1:132,134:165)]), label = as.numeric(fights_train$Winner)-1)
+# Create test matrix
+gtest <- xgb.DMatrix(data = as.matrix(fights_test[,c(1:132,134:165)]), label = as.numeric(fights_test$Winner)-1)
+```
+
+```{r}
+set.seed(1234)
+fight_boost <- xgb.cv(data = gtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+               
+               eta = .3, # Set learning rate
+              
+               nrounds = 1000, # Set number of rounds
+               early_stopping_rounds = 50, # Set number of rounds to stop at if there is no improvement
+               
+               verbose = 1, # 1 - Prints out fit
+               nthread = 1, # Set number of parallel threads
+               print_every_n = 20, # Prints out result every 20th iteration
+              
+               objective = "binary:logistic", # Set objective
+               eval_metric = "auc",
+               eval_metric = "error") # Set evaluation metric to use
+
+gnb <- cbind.data.frame(fight_boost$evaluation_log[,c("iter", "test_error_mean")], rep(0.3, nrow(fight_boost$evaluation_log)))
+names(gnb)[3] <- "eta"
+```
+
+```{r}
+fight_1 <- ggplot(fight_boost$evaluation_log, aes(x = iter, y = test_error_mean)) + # Set x as trees and y as error
+  geom_point(alpha = 0.5, color = "blue") + # Select geom point
+  theme_bw() + # Set theme
+  geom_smooth() + # Add smoothing line
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Number of Trees", title = "Error Rate v Number of Trees",
+       y = "Error Rate")  # Set labels
+fight_1 # Print plot```
+```
+
+```{r}
+set.seed(1234)
+fight_boost1 <- xgboost(data = gtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+               
+               eta = 0.05, # Set learning rate
+              
+               nrounds = 200, # Set number of rounds
+               early_stopping_rounds = 20, # Set number of rounds to stop at if there is no improvement
+               
+               verbose = 1, # 1 - Prints out fit
+               nthread = 1, # Set number of parallel threads
+               print_every_n = 20, # Prints out result every 20th iteration
+              
+               objective = "binary:logistic", # Set objective
+               eval_metric = "auc",
+               eval_metric = "error") # Set evaluation metric to use
+
+```
+
+```{r}
+fight_preds <- predict(fight_boost1, gtest, type = "prob") # Create predictions
+
+# Convert predictions to classes, using 0.5
+fight_preds_class <- rep("0", length(fight_preds))
+fight_preds_class[fight_preds >= 0.5] <- "1"
+
+
+t <- table(fight_preds_class, fights_test$Winner) # Create table
+confusionMatrix(t, positive = '1') # Produce confusion matrix
+## ACCURACY: 0.5618
+## SENSITIVITY: 0.7899
+```
+
+```{r}
+imp_mat <- xgb.importance(model = fight_boost1)
+#Plot importance (top 10 variables)
+xgb.plot.importance(imp_mat, top_n = 10)
+
+## MOST IMPORTANT VARIABLES:
+# age_diff, avg_TD_att, avg_opp_SIG_STR_pct, avg_opp_SIG_STR_pct._opp, avg_SIG_STR_landed, avg_opp_TD_att, avg_TD_att._opp, avg_HEAD_landed, avg_opp_CTRL_time.seconds
+```
+
+```{r}
+max_depth_vals <- c(3, 5, 7, 10, 15) # Create vector of max depth values
+min_child_weight <- c(1,3,5,7, 10, 15) # Create vector of min child values
+
+# Expand grid of parameter values
+cv_params <- expand.grid(max_depth_vals, min_child_weight)
+names(cv_params) <- c("max_depth", "min_child_weight")
+# Create results vector
+error_vec <- rep(NA, nrow(cv_params)) 
+
+
+# Loop through results
+for(i in 1:nrow(cv_params)){
+  set.seed(1234)
+  bst_tune <- xgb.cv(data = gtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+              eta = 0.1, # Set learning rate
+              max.depth = cv_params$max_depth[i], # Set max depth
+              min_child_weight = cv_params$min_child_weight[i], # Set minimum number of samples in node to split
+             
+               
+              nrounds = 100, # Set number of rounds
+              early_stopping_rounds = 50, # Set number of rounds to stop at if there is no improvement
+               
+              verbose = 1, # 1 - Prints out fit
+              nthread = 1, # Set number of parallel threads
+              print_every_n = 20, # Prints out result every 20th iteration
+               
+              objective = "binary:logistic", # Set objective
+              eval_metric = "error") # Set evaluation metric to use
+  error_vec[i] <- bst_tune$evaluation_log$test_error_mean[bst_tune$best_ntreelimit]
+}
+
+```
+
+```{r}
+# Join results in dataset
+res_db <- cbind.data.frame(cv_params, error_vec)
+names(res_db)[3] <- "error" 
+res_db$max_depth <- as.factor(res_db$max_depth) # Convert tree number to factor for plotting
+res_db$min_child_weight <- as.factor(res_db$min_child_weight) # Convert node size to factor for plotting
+# Print AUC heatmap
+g_2 <- ggplot(res_db, aes(y = max_depth, x = min_child_weight, fill = error)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+    mid = "white", # Choose mid color
+    high = "red", # Choose high color
+    midpoint =mean(res_db$error), # Choose mid point
+    space = "Lab", 
+    na.value ="grey", # Choose NA value
+    guide = "colourbar", # Set color bar
+    aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Minimum Child Weight", y = "Max Depth", fill = "Error") # Set labels
+g_2 # Generate plot
+```
+
+
+## BASED ON THE BEST MIN CHILD WEIGHT (7) & MAX DEPTH (3), we will be trying to determine the eta:
+```{r}
+
+# Use xgb.cv to run cross-validation inside xgboost
+set.seed(1234)
+bst_mod_1 <- xgb.cv(data = gtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+               
+              eta = 0.3, # Set learning rate
+              max.depth = 3, # Set max depth
+              min_child_weight = 7, # Set minimum number of samples in node to split
+              gamma = 0, # Set minimum loss reduction for split
+              subsample = 0.9, # Set proportion of training data to use in tree
+              colsample_bytree =  0.9, # Set number of variables to use in each tree
+               
+              nrounds = 1000, # Set number of rounds
+              early_stopping_rounds = 20, # Set number of rounds to stop at if there is no improvement
+               
+              verbose = 1, # 1 - Prints out fit
+              nthread = 1, # Set number of parallel threads
+              print_every_n = 20, # Prints out result every 20th iteration
+              
+              objective = "binary:logistic", # Set objective
+              eval_metric = "auc",
+              eval_metric = "error") # Set evaluation metric to use
+
+
+set.seed(1234)
+bst_mod_2 <- xgb.cv(data = gtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+               
+              eta = 0.1, # Set learning rate
+              max.depth =  3, # Set max depth
+              min_child_weight = 7, # Set minimum number of samples in node to split
+              gamma = 0, # Set minimum loss reduction for split
+              subsample = 0.9 , # Set proportion of training data to use in tree
+              colsample_bytree = 0.9, # Set number of variables to use in each tree
+               
+              nrounds = 1000, # Set number of rounds
+              early_stopping_rounds = 20, # Set number of rounds to stop at if there is no improvement
+               
+              verbose = 1, # 1 - Prints out fit
+              nthread = 1, # Set number of parallel threads
+              print_every_n = 20, # Prints out result every 20th iteration
+              
+              objective = "binary:logistic", # Set objective
+              eval_metric = "auc",
+              eval_metric = "error") # Set evaluation metric to use
+set.seed(1234)
+bst_mod_3 <- xgb.cv(data = gtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+               
+              eta = 0.05, # Set learning rate
+              max.depth = 3, # Set max depth
+              min_child_weight = 7 , # Set minimum number of samples in node to split
+              gamma = 0, # Set minimum loss reduction for split
+              subsample = 0.9 , # Set proportion of training data to use in tree
+              colsample_bytree =  0.9, # Set number of variables to use in each tree
+               
+              nrounds = 1000, # Set number of rounds
+              early_stopping_rounds = 20, # Set number of rounds to stop at if there is no improvement
+               
+              verbose = 1, # 1 - Prints out fit
+              nthread = 1, # Set number of parallel threads
+              print_every_n = 20, # Prints out result every 20th iteration
+              
+              objective = "binary:logistic", # Set objective
+              eval_metric = "auc",
+              eval_metric = "error") # Set evaluation metric to use
+set.seed(1234)
+bst_mod_4 <- xgb.cv(data = gtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+               
+              eta = 0.01, # Set learning rate
+              max.depth = 3, # Set max depth
+              min_child_weight = 7, # Set minimum number of samples in node to split
+              gamma = 0.1, # Set minimum loss reduction for split
+              subsample = 0.9 , # Set proportion of training data to use in tree
+              colsample_bytree = 0.9, # Set number of variables to use in each tree
+               
+              nrounds = 1000, # Set number of rounds
+              early_stopping_rounds = 20, # Set number of rounds to stop at if there is no improvement
+               
+              verbose = 1, # 1 - Prints out fit
+              nthread = 1, # Set number of parallel threads
+              print_every_n = 20, # Prints out result every 20th iteration
+              
+              objective = "binary:logistic", # Set objective
+              eval_metric = "auc",
+              eval_metric = "error") # Set evaluation metric to use
+
+set.seed(1234)
+bst_mod_5 <- xgb.cv(data = gtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+               
+              eta = 0.005, # Set learning rate
+              max.depth = 3, # Set max depth
+              min_child_weight = 7, # Set minimum number of samples in node to split
+              gamma = 0, # Set minimum loss reduction for split
+              subsample = 0.9 , # Set proportion of training data to use in tree
+              colsample_bytree = 0.9, # Set number of variables to use in each tree
+               
+              nrounds = 1000, # Set number of rounds
+              early_stopping_rounds = 20, # Set number of rounds to stop at if there is no improvement
+               
+              verbose = 1, # 1 - Prints out fit
+              nthread = 1, # Set number of parallel threads
+              print_every_n = 20, # Prints out result every 20th iteration
+               
+              objective = "binary:logistic", # Set objective
+              eval_metric = "auc",
+              eval_metric = "error") # Set evaluation metric to use
+```
+
+```{r}
+pd1 <- cbind.data.frame(bst_mod_1$evaluation_log[,c("iter", "test_error_mean")], rep(0.3, nrow(bst_mod_1$evaluation_log)))
+names(pd1)[3] <- "eta"
+# Extract results for model with eta = 0.1
+pd2 <- cbind.data.frame(bst_mod_2$evaluation_log[,c("iter", "test_error_mean")], rep(0.1, nrow(bst_mod_2$evaluation_log)))
+names(pd2)[3] <- "eta"
+# Extract results for model with eta = 0.05
+pd3 <- cbind.data.frame(bst_mod_3$evaluation_log[,c("iter", "test_error_mean")], rep(0.05, nrow(bst_mod_3$evaluation_log)))
+names(pd3)[3] <- "eta"
+# Extract results for model with eta = 0.01
+pd4 <- cbind.data.frame(bst_mod_4$evaluation_log[,c("iter", "test_error_mean")], rep(0.01, nrow(bst_mod_4$evaluation_log)))
+names(pd4)[3] <- "eta"
+# Extract results for model with eta = 0.005
+pd5 <- cbind.data.frame(bst_mod_5$evaluation_log[,c("iter", "test_error_mean")], rep(0.005, nrow(bst_mod_5$evaluation_log)))
+names(pd5)[3] <- "eta"
+# Join datasets
+plot_data <- rbind.data.frame(pd1, pd2, pd3, pd4, pd5)
+# Converty ETA to factor
+plot_data$eta <- as.factor(plot_data$eta)
+# Plot points
+g_6 <- ggplot(plot_data, aes(x = iter, y = test_error_mean, color = eta))+
+  geom_point(alpha = 0.5) +
+  theme_bw() + # Set theme
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Number of Trees", title = "Error Rate v Number of Trees",
+       y = "Error Rate", color = "Learning \n Rate")  # Set labels
+g_6
+```
+
+
+## WE WILL END UP WITH THE BEST ETA (.1), number of rounds, max depth of 15, and min child weight of 1.
+
+```{r}
+set.seed(1234)
+bst_final <- xgboost(data = gtrain, # Set training data
+              
+        
+               
+              eta = 0.1, # Set learning rate
+              max.depth =  3, # Set max depth
+              min_child_weight = 7, # Set minimum number of samples in node to split
+              gamma = 0, # Set minimum loss reduction for split
+              subsample =  0.9, # Set proportion of training data to use in tree
+              colsample_bytree = 0.9, # Set number of variables to use in each tree
+               
+              nrounds = 100, # Set number of rounds
+              early_stopping_rounds = 20, # Set number of rounds to stop at if there is no improvement
+               
+              verbose = 1, # 1 - Prints out fit
+              nthread = 1, # Set number of parallel threads
+              print_every_n = 20, # Prints out result every 20th iteration
+              
+              objective = "binary:logistic", # Set objective
+              eval_metric = "auc",
+              eval_metric = "error") # Set evaluation metric to use
+
+
+fight_preds_best <- predict(bst_final, gtest, type = "prob") # Create predictions
+
+# Convert predictions to classes, using 0.45
+fight_preds_best_class <- rep("0", length(fight_preds_best))
+fight_preds_best_class[fight_preds_best >= 0.45] <- "1"
+
+
+t <- table(fight_preds_best_class, fights_test$Winner) # Create table
+confusionMatrix(t, positive = '1')
+# CUTOFF - 0.45
+# ACCURACY: 0.6035
+# SENSITIVITY: 0.7554
+# SPECIFICITY: 0.4569
+
+# CUTOFF - 0.55
+# ACCURACY: 0.5788
+# SENSITIVITY: 0.4388
+# SPECIFICITY: 0.7139
+```
+
+## VARIABLE IMPORTANCE PLOTS BASED ON OUR Best MODEL
+```{r}
+imp_mat <- xgb.importance(model = bst_final)
+#Plot importance (top 10 variables)
+xgb.plot.importance(imp_mat, top_n = 10)
+
+## 10 MOST IMPORTANT VARIABLES:
+# age_diff, reach_diff, longest_win_streak, avg_SIG_STR_landed_opp, avg_HEAD_landed_opp, longest_win_streak_opp, avg_TD_att, avg_opp_SIG_STR_pct, avg_SIG_STR_landed, avg_HEAD_landed
+```
+
+____________________________________________________________________________________________________________________________________________________________________________
+## SHAP PLOT
+
+```{r}
+source("a_insights_shap_functions.r")
+```
+
+```{r}
+shap_result_1 <- shap.score.rank(xgb_model = bst_final, 
+                X_train = as.matrix(fights_train[,c(1:132,134:165)]),
+                shap_approx = F)
+```
+
+```{r}
+shap_long_1 = shap.prep(shap = shap_result_1,
+                           X_train = as.matrix(fights_train[,c(1:132,134:165)]), 
+                           top_n = 10)
+```
+
+```{r}
+plot.shap.summary(data_long = shap_long_1)
+```
+
+```{r}
+# Exclude Non-Controllable Variables from G-Train and G-Test
+fights_train_exclude <- fights_train[, !(colnames(fights_train) %in% c("total_title_bouts", "total_time_fought.seconds.", "total_rounds_fought", "total_title_bouts", "current_win_streak", "current_lose_streak", "longest_win_streak", "wins", "losses", "win_by_Decision_Majority", "win_by_Decision_Split", "win_by_Decision_Unanimous", "win_by_KO.TKO", "win_by_Submission", "win_by_TKO_Doctor_Stoppage", "Height_cms", "Reach_cms", "age", "total_time_fought.seconds.._opp", "total_rounds_fought._opp", "total_title_bouts._opp", "current_win_streak._opp", "current_lose_streak._opp", "longest_win_streak._opp", "wins._opp", "losses._opp", "win_by_Decision_Majority._opp", "win_by_Decision_Split._opp", "win_by_Decision_Unanimous._opp", "win_by_KO.TKO._opp", "win_by_Submission._opp", "win_by_TKO_Doctor_Stoppage._opp", "Height_cms._opp", "Reach_cms._opp", "age._opp", "title_bout", "age_diff", "height_diff", "weight_diff", "reach_diff", "days", "month", "Referee_Dan.Miragliotta", "Referee_Herb.Dean", "Referee_John.McCarthy", "Referee_Marc.Goddard", "Referee_Mario.Yamasaki", "Referee_Other"))]
+fights_test_exclude <- fights_test[, !(colnames(fights_test) %in% c("total_title_bouts", "total_time_fought.seconds.", "total_rounds_fought", "total_title_bouts", "current_win_streak", "current_lose_streak", "longest_win_streak", "wins", "losses", "win_by_Decision_Majority", "win_by_Decision_Split", "win_by_Decision_Unanimous", "win_by_KO.TKO", "win_by_Submission", "win_by_TKO_Doctor_Stoppage", "Height_cms", "Reach_cms", "age", "total_time_fought.seconds.._opp", "total_rounds_fought._opp", "total_title_bouts._opp", "current_win_streak._opp", "current_lose_streak._opp", "longest_win_streak._opp", "wins._opp", "losses._opp", "win_by_Decision_Majority._opp", "win_by_Decision_Split._opp", "win_by_Decision_Unanimous._opp", "win_by_KO.TKO._opp", "win_by_Submission._opp", "win_by_TKO_Doctor_Stoppage._opp", "Height_cms._opp", "Reach_cms._opp", "age._opp", "title_bout", "age_diff", "height_diff", "weight_diff", "reach_diff", "days", "month", "Referee_Dan.Miragliotta", "Referee_Herb.Dean", "Referee_John.McCarthy", "Referee_Marc.Goddard", "Referee_Mario.Yamasaki", "Referee_Other"))]
+
+set.seed(1234) # Set random number generator seed for reproducibility
+#names(fights_train)
+gtrain_exclude <- xgb.DMatrix(data = as.matrix(fights_train_exclude[,c(1:98,100:118)]), label = as.numeric(fights_train_exclude$Winner)-1)
+# Create test matrix
+gtest_exclude <- xgb.DMatrix(data = as.matrix(fights_test_exclude[,c(1:98,100:118)]), label = as.numeric(fights_test_exclude$Winner)-1)
+
+colnames(fights_train_exclude)
+```
+
+```{r}
+# Run New XgBoost Model
+set.seed(1234)
+bst_final_2 <- xgboost(data = gtrain_exclude, # Set training data
+              
+        
+               
+              eta = 0.1, # Set learning rate
+              max.depth =  3, # Set max depth
+              min_child_weight = 7, # Set minimum number of samples in node to split
+              gamma = 0, # Set minimum loss reduction for split
+              subsample =  0.9, # Set proportion of training data to use in tree
+              colsample_bytree = 0.9, # Set number of variables to use in each tree
+               
+              nrounds = 100, # Set number of rounds
+              early_stopping_rounds = 20, # Set number of rounds to stop at if there is no improvement
+               
+              verbose = 1, # 1 - Prints out fit
+              nthread = 1, # Set number of parallel threads
+              print_every_n = 20, # Prints out result every 20th iteration
+              
+              objective = "binary:logistic", # Set objective
+              eval_metric = "auc",
+              eval_metric = "error") # Set evaluation metric to use
+
+
+fight_preds_2 <- predict(bst_final_2, gtest_exclude, type = "prob") # Create predictions
+
+# Convert predictions to classes, using 0.55
+fight_preds_2_class <- rep("0", length(fight_preds_2))
+fight_preds_2_class[fight_preds_2 >= 0.55] <- "1"
+
+
+t_2 <- table(fight_preds_2_class, fights_test_exclude$Winner) # Create table
+confusionMatrix(t_2, positive = '1')
+```
+
+```{r}
+shap_result_2 <- shap.score.rank(xgb_model = bst_final_2, 
+                X_train = as.matrix(fights_train_exclude[,c(1:98,100:118)]),
+                shap_approx = F)
+```
+
+```{r}
+shap_long_2 = shap.prep(shap = shap_result_2,
+                           X_train = as.matrix(fights_train_exclude[,c(1:98,100:118)]), 
+                           top_n = 10)
+```
+
+```{r}
+plot.shap.summary(data_long = shap_long_2)
+```
+
+
+```{r}
+# Calculate initial model ROC
+roc1 = roc(fights_test$Winner, fight_preds)
+# Calculate performance vars model ROC
+roc2 = roc(fights_test$Winner, fight_preds_2)
+# Calculate performance vars model ROC
+roc3 = roc(fights_test$Winner, fight_preds_best)
+# Print initial model AUC
+plot.roc(roc1, print.auc = TRUE, print.auc.x = 0.25, print.auc.y = 0.6, col = "red", print.auc.col = "red")
+# Print performance vars model AUC
+plot.roc(roc2, print.auc = TRUE, print.auc.x = 0.25, print.auc.y = 0.4, col ="blue", print.auc.col = "blue", add = TRUE)
+# Print best model AUC
+plot.roc(roc3, print.auc = TRUE, print.auc.x = 0.25, print.auc.y = 0.2, col ="green", print.auc.col = "green", add = TRUE)
+```
+
+```{r}
+# Prepare for ROC/AUC
+tree_preds <- predict(tree_model, fights_test, type = 'prob')
+rf_preds_1 <- predict(rf_rate, fights_test, type = 'prob')
+
+# Calculate decision tree model ROC
+roc1 = roc(fights_test$Winner, tree_preds[,2])
+# Calculate random forest model ROC
+roc2 = roc(fights_test$Winner, rf_preds_1[,2])
+# Calculate XgBoost model ROC
+roc3 = roc(fights_test$Winner, fight_preds_best)
+# Print decision tree model AUC
+plot.roc(roc1, print.auc = TRUE, print.auc.x = 0.25, print.auc.y = 0.6, col = "red", print.auc.col = "red")
+# Print random forest model AUC
+plot.roc(roc2, print.auc = TRUE, print.auc.x = 0.25, print.auc.y = 0.4, col ="blue", print.auc.col = "blue", add = TRUE)
+# Print XgBoost model AUC
+plot.roc(roc3, print.auc = TRUE, print.auc.x = 0.25, print.auc.y = 0.2, col ="green", print.auc.col = "green", add = TRUE)
+```
