@@ -1,2 +1,2 @@
 # UFC_Fight_Prediction
-Predicting Fight Outcomes
+Predicting Fight Outcomes based on 100+ variables
